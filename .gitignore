@@ -1,0 +1,19 @@
+# 실제 설정 파일은 커밋하지 않는다 (.example 만 커밋)
+config.toml
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# 자격증명
+*.pem
+*.key
+.env
+
+.idea/
+.vscode/

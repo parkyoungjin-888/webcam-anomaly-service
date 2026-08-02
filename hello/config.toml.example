@@ -1,0 +1,13 @@
+# 로컬 실행용 설정 예시. 실제 config.toml 은 커밋하지 않는다.
+#
+# 클러스터에서는 이 값들을 ConfigMap 으로 주입한다
+# (webcam-anomaly-deployment/manifests/hello/values.yaml 의 config 블록).
+# 설정을 Git 안에 두어 ArgoCD 가 변경을 diff 로 보여줄 수 있게 하는 것이 목적이다.
+
+[app]
+name = "hello"
+log_level = "INFO"
+
+[server]
+host = "0.0.0.0"
+port = 8000
