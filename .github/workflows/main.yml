@@ -1,0 +1,89 @@
+name: build and push images
+
+on:
+  push:
+    branches:
+      - main
+
+# 같은 브랜치에 연속 push 가 들어와도 순서를 지킨다.
+# 이미지 태그가 겹칠 수 있으므로 중간 실행을 취소하지는 않는다.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build changed services
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 변경된 서비스 디렉터리 탐지
+        id: changed
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            # 레포 최초 push. 비교 대상이 없으므로 전체를 대상으로 한다.
+            dirs=$(ls -d */ 2>/dev/null | sed 's#/##' || true)
+          else
+            dirs=$(git diff --name-only "$BEFORE" "$AFTER" | cut -d/ -f1 | sort -u || true)
+          fi
+
+          # pyproject.toml 이 있는 최상위 디렉터리만 서비스로 취급한다.
+          # .github 같은 디렉터리는 자연히 걸러진다.
+          services=""
+          for d in $dirs; do
+            if [ -f "$d/pyproject.toml" ]; then
+              services="$services $d"
+            fi
+          done
+          services=$(echo $services | xargs || true)
+
+          echo "services=$services" >> "$GITHUB_OUTPUT"
+          if [ -z "$services" ]; then
+            echo "빌드할 서비스 없음"
+          else
+            echo "빌드 대상: $services"
+          fi
+
+      - name: Docker Hub 로그인
+        if: steps.changed.outputs.services != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: 빌드 및 푸시
+        if: steps.changed.outputs.services != ''
+        env:
+          SERVICES: ${{ steps.changed.outputs.services }}
+          REGISTRY_USER: ${{ secrets.DOCKER_USERNAME }}
+        run: |
+          # set -e 가 핵심이다. 이전 프로젝트는 `docker build ... || true` 를 썼는데,
+          # 뒤따르는 `if [ $? -eq 0 ]` 이 항상 참이 되어 빌드에 실패한 이미지 이름이
+          # 푸시 목록에 올라갔다. 실패는 실패로 끝나야 한다.
+          set -euo pipefail
+
+          for d in $SERVICES; do
+            version=$(grep -Po '(?<=^version = ")[^"]*' "$d/pyproject.toml" | head -n1)
+            if [ -z "$version" ]; then
+              echo "::error::$d/pyproject.toml 에서 version 을 찾을 수 없다"
+              exit 1
+            fi
+
+            image="$REGISTRY_USER/$d:$version"
+            echo "::group::$image"
+            docker build -t "$image" "$d"
+            docker push "$image"
+            echo "::endgroup::"
+            echo "푸시 완료: $image"
+          done
