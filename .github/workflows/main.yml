@@ -6,14 +6,14 @@ on:
       - main
 
 # 같은 브랜치에 연속 push 가 들어와도 순서를 지킨다.
-# 이미지 태그가 겹칠 수 있으므로 중간 실행을 취소하지는 않는다.
+# 배포 레포에 커밋을 밀어넣으므로 중간 실행을 취소하지는 않는다.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   build:
-    name: build changed services
+    name: test, build, push
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -32,14 +32,12 @@ jobs:
           set -euo pipefail
 
           if [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
-            # 레포 최초 push. 비교 대상이 없으므로 전체를 대상으로 한다.
             dirs=$(ls -d */ 2>/dev/null | sed 's#/##' || true)
           else
             dirs=$(git diff --name-only "$BEFORE" "$AFTER" | cut -d/ -f1 | sort -u || true)
           fi
 
           # pyproject.toml 이 있는 최상위 디렉터리만 서비스로 취급한다.
-          # .github 같은 디렉터리는 자연히 걸러진다.
           services=""
           for d in $dirs; do
             if [ -f "$d/pyproject.toml" ]; then
@@ -52,8 +50,40 @@ jobs:
           if [ -z "$services" ]; then
             echo "빌드할 서비스 없음"
           else
-            echo "빌드 대상: $services"
+            echo "대상: $services"
           fi
+
+      # ---------- 테스트 게이트 ----------
+      # 빌드 앞에 둔다. 여기서 떨어지면 이미지는 만들어지지 않는다.
+
+      - name: uv 설치
+        if: steps.changed.outputs.services != ''
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: ruff + pytest
+        if: steps.changed.outputs.services != ''
+        env:
+          SERVICES: ${{ steps.changed.outputs.services }}
+        run: |
+          set -euo pipefail
+          for d in $SERVICES; do
+            echo "::group::$d"
+            (
+              cd "$d"
+              uv sync --frozen
+              uv run ruff check .
+              uv run pytest -q
+            )
+            echo "::endgroup::"
+          done
+
+      # ---------- 빌드 & 푸시 ----------
+
+      - name: buildx 준비
+        if: steps.changed.outputs.services != ''
+        uses: docker/setup-buildx-action@v3
 
       - name: Docker Hub 로그인
         if: steps.changed.outputs.services != ''
@@ -63,15 +93,20 @@ jobs:
           password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: 빌드 및 푸시
+        id: build
         if: steps.changed.outputs.services != ''
         env:
           SERVICES: ${{ steps.changed.outputs.services }}
           REGISTRY_USER: ${{ secrets.DOCKER_USERNAME }}
+          SHA: ${{ github.sha }}
         run: |
           # set -e 가 핵심이다. 이전 프로젝트는 `docker build ... || true` 를 썼는데,
           # 뒤따르는 `if [ $? -eq 0 ]` 이 항상 참이 되어 빌드에 실패한 이미지 이름이
           # 푸시 목록에 올라갔다. 실패는 실패로 끝나야 한다.
           set -euo pipefail
+
+          short_sha="${SHA:0:7}"
+          image_list=""
 
           for d in $SERVICES; do
             version=$(grep -Po '(?<=^version = ")[^"]*' "$d/pyproject.toml" | head -n1)
@@ -80,10 +115,61 @@ jobs:
               exit 1
             fi
 
-            image="$REGISTRY_USER/$d:$version"
+            # 태그에 SHA 를 붙인다. version 만 쓰면 코드만 고쳤을 때 태그가 같아
+            # 배포 레포에 커밋이 생기지 않고, 파이프라인은 초록불인데 옛 코드가 남는다.
+            image="$REGISTRY_USER/$d:$version-$short_sha"
+            cache="$REGISTRY_USER/$d:buildcache"
+
             echo "::group::$image"
-            docker build -t "$image" "$d"
-            docker push "$image"
+            docker buildx build \
+              --tag "$image" \
+              --cache-from "type=registry,ref=$cache" \
+              --cache-to "type=registry,ref=$cache,mode=max" \
+              --push \
+              "$d"
             echo "::endgroup::"
-            echo "푸시 완료: $image"
+
+            image_list="$image_list $image"
           done
+
+          echo "images=$(echo $image_list | xargs)" >> "$GITHUB_OUTPUT"
+
+      # ---------- 배포 레포 갱신 ----------
+
+      - name: 배포 레포 체크아웃
+        if: steps.build.outputs.images != ''
+        uses: actions/checkout@v4
+        with:
+          repository: parkyoungjin-888/webcam-anomaly-deployment
+          path: deployment
+          ref: main
+          token: ${{ secrets.MY_GITHUB_TOKEN }}
+
+      - name: values.yaml 이미지 태그 갱신
+        if: steps.build.outputs.images != ''
+        env:
+          IMAGES: ${{ steps.build.outputs.images }}
+        run: |
+          set -euo pipefail
+          cd deployment
+
+          for image in $IMAGES; do
+            name_no_tag="${image%:*}"
+            # 이미지 이름 기준으로 치환한다. 한 이미지를 여러 차트가 공유해도 동시에 갱신된다.
+            for f in ./manifests/*/values*.yaml; do
+              [ -e "$f" ] || continue
+              sed -i "s|image: *${name_no_tag}:.*|image: ${image}|" "$f"
+              git add "$f"
+            done
+          done
+
+          if git diff --cached --quiet; then
+            echo "변경 없음 — 커밋하지 않는다"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore: 이미지 태그 갱신 -$(printf ' %s' $IMAGES)"
+          git push
+          echo "배포 레포 갱신 완료"
