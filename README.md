@@ -64,6 +64,32 @@ hello/    파이프라인 검증용 더미 (FastAPI /health)
 `type=gha` 는 루프 안에서 쓰려면 런타임 토큰을 노출하는 별도 액션이 필요하고,
 Phase 2 의 멀티아치 빌드에서도 레지스트리 캐시가 그대로 쓰인다.
 
+## 코드 규칙
+
+백엔드 코드 컨벤션(`project_manager/code-conventions.md`)을 따른다.
+네이밍, 타입 힌트(3.10+ 문법), 서식, 주석 원칙, 디렉터리 구조는 그대로다.
+
+강제 가능한 부분은 각 서비스의 `pyproject.toml` 에 ruff 설정으로 넣었다.
+자동으로 잡히는 것은 네이밍(N), `Optional`/`List`/`Dict` 금지(UP), 작은따옴표(Q),
+한 줄 안의 trailing comma(COM819), 줄 길이 140(E501) 정도다.
+
+compact 스타일, 인자 추출, 가드절 뒤 빈 줄 같은 서식 규칙은 ruff 로 표현할 수 없다.
+`ruff format` 은 쓰지 않는다 — compact 스타일을 컨벤션이 금지한 expanded 로 바꾸고
+따옴표를 큰따옴표로 뒤집는다. 린터(`ruff check`)만 쓴다.
+
+### 컨벤션과 다르게 가는 것
+
+컨벤션은 systemd 로 도는 서버를 전제로 쓰였다. 여기는 컨테이너라 아래 셋은 따르지 않는다.
+
+| 컨벤션 | 여기서는 | 이유 |
+|---|---|---|
+| `ConfigSingleton` + `config.toml` | ConfigMap → 환경변수 | 설정을 Git(Helm values)에 두어야 ArgoCD 가 변경을 diff 로 보여준다. 설정이 컨테이너 안에 있으면 Phase 1 에서 gRPC 설정 서버를 뺀 이유가 그대로 되살아난다 |
+| `LoggerSingleton` 의 파일 로깅(`log/`) | stdout | 파드가 죽으면 파일이 사라지고 `kubectl logs` 에 잡히지 않는다. 스토리지가 `local-path` 뿐이라 노드를 옮기면 더 확실히 잃는다 |
+| 사내 공용 패키지(`my_module`) | 사용하지 않음 | 비공개 레포라 Public 레포 + Actions 빌드에서 PAT 시크릿과 Dockerfile secret mount 가 추가로 필요하다 |
+
+`config.toml.example` 은 로컬 실행 참고용으로 남겨 둔다.
+README 템플릿의 systemd 배포 절차도 해당 없다 — 배포는 ArgoCD 가 한다.
+
 ## 로컬 개발
 
 ```bash

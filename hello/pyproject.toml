@@ -23,7 +23,25 @@ dev = [
 ]
 
 [tool.ruff]
-line-length = 100
+# 원칙은 "한 줄로 쓸 수 있으면 한 줄로". 140 은 상한이지 목표가 아니다.
+line-length = 140
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "N", "UP", "B", "SIM", "COM", "Q", "ASYNC", "RUF"]
+ignore = [
+    "COM812",  # trailing comma 를 붙이라는 규칙 — 컨벤션은 반대로 금지한다
+]
+
+# 켜지 않는 것과 이유:
+#   D      docstring 을 강제한다. 컨벤션은 docstring 대신 함수 위 주석을 쓴다.
+#   ANN    모든 인자에 타입 힌트를 강제한다. 과도하다.
+#   G004   f-string 로깅을 금지한다. 컨벤션은 단순 메시지에 f-string 을 허용한다.
+#   TRY401 logger.exception 의 str(e) 를 중복이라 본다. 컨벤션은 이유를 들어 권장한다.
+# ruff format 도 쓰지 않는다 — compact 스타일을 expanded 로 바꾸고 따옴표를 뒤집는다.
+
+[tool.ruff.lint.flake8-quotes]
+inline-quotes = "single"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
